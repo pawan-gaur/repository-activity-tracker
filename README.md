@@ -1,16 +1,17 @@
-# GitHub Repository Activity Connector (Spring Boot, Java 17)
+# GitHub Repository Activity Tracker (Spring Boot, Java 17)
 
-Fetch public repositories for a given GitHub **user or organization**, and for each repository retrieve the **last N commits** (default 20) with **pagination support**.
+A Spring Boot application that fetches public repositories for a given GitHub **user or organization**, and retrieves the **last N commits** (default 20) with **pagination support**.
 
 ## Features
 - Personal Access Token (classic or fine-grained) authentication
-- Handles users **and** orgs (tries both endpoints)
+- Handles users **and** organizations (tries both endpoints)
 - **Pagination support** for repository activities with customizable page size
 - Per-repo fetch of recent commits (default `limit=20`)
 - Graceful error handling (rate limits ⇒ HTTP 429 with `retryAfter`)
-- **REST API** and **CLI** usage
+- **REST API** with comprehensive validation
 - Java 17, Spring Boot 3, synchronous `RestClient`
 - Asynchronous processing for improved performance
+- Comprehensive test coverage
 
 ## Quick Start
 
@@ -21,22 +22,21 @@ Create a GitHub Personal Access Token and export it (recommended):
 export GITHUB_TOKEN=ghp_xxx...   # or fine-grained token
 ```
 
-Alternatively, set it in `src/main/resources/application.yml` (not recommended).
+Alternatively, set it in `src/main/resources/application.yml` (not recommended for production).
 
 ### 2) Build & Run
 ```bash
-./mvnw spring-boot:run -Dspring-boot.run.arguments="--username=octocat"
+./mvnw spring-boot:run
 ```
 Or build a jar:
 ```bash
 ./mvnw -q -DskipTests package
-java -jar target/github-activity-connector-0.0.1.jar --username=octocat
+java -jar target/repository-activity-tracker-0.0.1.jar
 ```
 
 ### 3) REST API
-Start the app (without CLI) and call the endpoint:
+Start the app and call the endpoint:
 ```bash
-java -jar target/github-activity-connector-0.0.1.jar --no-cli
 curl "http://localhost:8080/api/github/activity/octocat?page=0&size=10&limit=20"
 ```
 
@@ -116,10 +116,11 @@ curl "http://localhost:8080/api/github/activity/octocat?size=100"
 - **Pagination**: Repository listing follows `Link` header RFC5988; we parse `rel="next"` to traverse pages until exhausted. The pagination is implemented at the repository level, not commits.
 - **Commits**: We request `per_page=limit` and slice to `limit`. (Max 100 per GitHub API.)
 - **Users vs Orgs**: We first call `/users/{username}/repos`; if nothing is returned we try `/orgs/{username}/repos`.
-- **Rate limits**: If GitHub returns 403/429 we surface `429` to callers with helpful metadata; CLI prints a friendly message.
+- **Rate limits**: If GitHub returns 403/429 we surface `429` to callers with helpful metadata.
 - **Extensibility**: Client/Service/Controller layers allow swapping in other connectors with the same shape.
 - **Asynchronous Processing**: Repository commits are fetched concurrently for improved performance.
 - **Custom Pagination**: Implemented without Spring Data dependencies for lightweight deployment.
+- **Validation**: Comprehensive input validation with proper error responses.
 
 ## Project Layout
 ```
@@ -134,8 +135,6 @@ src/main/java/io/example/github/
 │   └── GithubServiceImpl.java              # Service implementation with pagination
 ├── controller/
 │   └── GithubController.java               # REST API controller with pagination
-├── cli/
-│   └── ActivityCli.java                    # Command-line interface
 ├── model/
 │   ├── RepoSummary.java                    # Repository metadata
 │   ├── CommitInfo.java                     # Commit information
@@ -166,6 +165,7 @@ The pagination is implemented at the repository level:
 - **Invalid Pages**: Returns empty page for out-of-bounds page requests
 - **Validation**: Input validation for page, size, and limit parameters
 - **Global Exception Handler**: Centralized error handling with consistent response format
+- **Empty Repositories**: Gracefully handles empty repositories (409 errors)
 
 ## Tests
 
@@ -174,11 +174,8 @@ The project includes comprehensive test coverage for the controller and paginati
 ### Test Structure
 ```
 src/test/java/io/example/github/
-├── controller/
-│   ├── GithubControllerTest.java              # Unit tests for controller
-│   └── GithubControllerIntegrationTest.java   # Integration tests with MockMvc
-└── model/
-    └── PageTest.java                          # Unit tests for pagination model
+└── controller/
+    └── GithubControllerTest.java              # Unit tests for controller
 ```
 
 ### Test Coverage
@@ -192,22 +189,6 @@ src/test/java/io/example/github/
 - ✅ Exception handling
 - ✅ Edge cases (null/empty usernames, large page numbers)
 - ✅ Maximum parameter validation
-
-#### Integration Tests (`GithubControllerIntegrationTest.java`)
-- ✅ REST endpoint validation with MockMvc
-- ✅ HTTP status code verification
-- ✅ JSON response structure validation
-- ✅ Query parameter validation
-- ✅ Error handling (400, 500 status codes)
-- ✅ Organization username handling
-- ✅ Special character username handling
-
-#### Model Tests (`PageTest.java`)
-- ✅ Pagination metadata calculations
-- ✅ Edge cases (empty content, exact divisions)
-- ✅ First/last/middle page scenarios
-- ✅ Large page number handling
-- ✅ Zero total elements handling
 
 ### Running Tests
 ```bash
@@ -229,22 +210,13 @@ src/test/java/io/example/github/
 void getActivity_WithDefaultParameters_ShouldReturnSuccess() {
     // Test implementation
 }
-
-// Integration test example
-@Test
-@DisplayName("Should return 200 OK with paginated response for valid request")
-void getActivity_ValidRequest_ShouldReturn200() throws Exception {
-    mockMvc.perform(get("/api/github/activity/testuser"))
-           .andExpect(status().isOk())
-           .andExpect(jsonPath("$.content", hasSize(1)));
-}
 ```
 
 ## Docker (optional)
 Build an image using Spring Boot Buildpacks:
 ```bash
 ./mvnw spring-boot:build-image
-docker run -e GITHUB_TOKEN -p 8080:8080 github-activity-connector:0.0.1 --no-cli
+docker run -e GITHUB_TOKEN -p 8080:8080 repository-activity-tracker:0.0.1
 ```
 
 ## Configuration
@@ -252,30 +224,39 @@ docker run -e GITHUB_TOKEN -p 8080:8080 github-activity-connector:0.0.1 --no-cli
 ### Application Properties
 ```yaml
 # src/main/resources/application.yml
-github:
-  api:
-    base-url: https://api.github.com
-    timeout: 30s
-    retry:
-      max-attempts: 3
-      backoff: 1s
-
 server:
   port: 8080
 
-logging:
-  level:
-    io.example.github: DEBUG
+github:
+  base-url: https://api.github.com
+  token: ${GITHUB_TOKEN:}   # set env var or put token here (not recommended)
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
 ```
 
 ### Environment Variables
 - `GITHUB_TOKEN`: GitHub Personal Access Token
 - `SERVER_PORT`: Application port (default: 8080)
 
+## Dependencies
+
+The project uses the following key dependencies:
+- **Spring Boot 3.3.2**: Core framework
+- **Spring Boot Starter Web**: REST API support
+- **Spring Boot Starter Validation**: Input validation
+- **Spring Boot Starter Actuator**: Health checks and monitoring
+- **Lombok**: Reduces boilerplate code
+- **Java 17**: Modern Java features
+
 ## Notes
 - Only **public** repositories are fetched with this sample. To include private repos, the token must have the required **repo** scope and the API endpoints would need to use the authenticated user/org visibility parameters.
 - This is a learning/demo project; production usage should add retries with jitter, caching, and more robust error mapping.
 - The pagination implementation is lightweight and doesn't require additional dependencies.
 - Consider implementing caching for frequently accessed repositories to reduce API calls.
+- The application includes health check endpoints at `/actuator/health` for monitoring.
 ```
 
