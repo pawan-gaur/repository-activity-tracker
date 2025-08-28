@@ -1,8 +1,10 @@
 package io.example.github.client;
 
 import io.example.github.model.CommitInfo;
+import io.example.github.model.PaginationResult;
 import io.example.github.model.RepoSummary;
 import io.example.github.util.GithubMappers;
+import io.example.github.util.GithubMappers.PaginationInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
@@ -35,6 +37,24 @@ public class GithubClient {
         return repos;
     }
 
+    public PaginationResult<RepoSummary> fetchReposWithPagination(String username, int perPage) {
+        // Try user repos, then org repos if 404.
+        PaginationResult<RepoSummary> result = tryPagedWithInfo("/users/{username}/repos", username, perPage);
+        if (result.getRepos().isEmpty()) {
+            result = tryPagedWithInfo("/orgs/{username}/repos", username, perPage);
+        }
+        return result;
+    }
+
+    public PaginationResult<RepoSummary> fetchReposByPage(String username, int page, int perPage) {
+        // Try user repos, then org repos if 404.
+        PaginationResult<RepoSummary> result = tryPagedByPage("/users/{username}/repos", username, page, perPage);
+        if (result.getRepos().isEmpty()) {
+            result = tryPagedByPage("/orgs/{username}/repos", username, page, perPage);
+        }
+        return result;
+    }
+
     private List<RepoSummary> tryPaged(String path, String username) {
         List<RepoSummary> acc = new ArrayList<>();
         String url = path + "?per_page=100&page=1&sort=updated";
@@ -53,6 +73,76 @@ public class GithubClient {
             url = next != null ? URI.create(next).getPath() + "?" + (URI.create(next).getQuery() == null ? "" : URI.create(next).getQuery()) : null;
         }
         return acc;
+    }
+
+    private PaginationResult<RepoSummary> tryPagedWithInfo(String path, String username, int perPage) {
+        List<RepoSummary> acc = new ArrayList<>();
+        String url = path + "?per_page=" + perPage + "&page=1&sort=updated";
+        url = url.replace("{username}", username);
+        int currentPage = 1;
+        int totalPages = 0;
+        boolean hasNext = false;
+        
+        while (url != null) {
+            ResponseEntity<Map[]> response = rest.get()
+                    .uri(url)
+                    .retrieve()
+                    .toEntity(Map[].class);
+            Map[] body = response.getBody();
+            if (body == null || body.length == 0) break;
+            
+            Arrays.stream(body)
+                    .map(m -> GithubMappers.mapRepo((Map<String, Object>) m))
+                    .forEach(acc::add);
+            
+            // Parse pagination info from headers
+            PaginationInfo paginationInfo = GithubMappers.parsePaginationInfo(response.getHeaders());
+            hasNext = paginationInfo.hasNext();
+            totalPages = paginationInfo.getTotalPages();
+            
+            if (hasNext) {
+                String nextUrl = paginationInfo.getNextUrl();
+                url = nextUrl != null ? URI.create(nextUrl).getPath() + "?" + (URI.create(nextUrl).getQuery() == null ? "" : URI.create(nextUrl).getQuery()) : null;
+                currentPage++;
+            } else {
+                url = null;
+            }
+        }
+        
+        return new PaginationResult<>(acc, totalPages, currentPage, hasNext);
+    }
+
+    private PaginationResult<RepoSummary> tryPagedByPage(String path, String username, int page, int perPage) {
+        String url = path + "?per_page=" + perPage + "&page=" + page + "&sort=updated";
+        url = url.replace("{username}", username);
+        
+        try {
+            ResponseEntity<Map[]> response = rest.get()
+                    .uri(url)
+                    .retrieve()
+                    .toEntity(Map[].class);
+            Map[] body = response.getBody();
+            List<RepoSummary> repos = new ArrayList<>();
+            
+            if (body != null) {
+                Arrays.stream(body)
+                        .map(m -> GithubMappers.mapRepo((Map<String, Object>) m))
+                        .forEach(repos::add);
+            }
+            
+            // Parse pagination info from headers
+            PaginationInfo paginationInfo = GithubMappers.parsePaginationInfo(response.getHeaders());
+            boolean hasNext = paginationInfo.hasNext();
+            int totalPages = paginationInfo.getTotalPages();
+            
+            return new PaginationResult<>(repos, totalPages, page, hasNext);
+        } catch (org.springframework.web.client.HttpClientErrorException ex) {
+            // Handle 404 - user/organization not found
+            if (ex.getStatusCode().value() == 404) {
+                return new PaginationResult<>(new ArrayList<>(), 0, page, false);
+            }
+            throw ex; // rethrow other errors
+        }
     }
 
     public List<CommitInfo> fetchRecentCommits(String username, String repo, int limit) {

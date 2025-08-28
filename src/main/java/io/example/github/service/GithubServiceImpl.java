@@ -3,6 +3,7 @@ package io.example.github.service;
 import io.example.github.client.GithubClient;
 import io.example.github.model.CommitInfo;
 import io.example.github.model.Page;
+import io.example.github.model.PaginationResult;
 import io.example.github.model.RepoActivity;
 import io.example.github.model.RepoSummary;
 import org.slf4j.Logger;
@@ -112,6 +113,30 @@ public class GithubServiceImpl implements GithubService {
                 results.size(), username, page, (int) Math.ceil((double) totalElements / size));
         
         return new Page<>(results, page, size, totalElements);
+    }
+
+    @Override
+    public Page<RepoSummary> fetchRepositoriesWithPagination(String username, int perPage) {
+        log.info("Fetching repositories with pagination for username: {} with per_page: {}", username, perPage);
+        
+        PaginationResult<RepoSummary> result = client.fetchReposWithPagination(username, perPage);
+        
+        log.info("Successfully fetched {} repositories for username: {} (page {} of {})", 
+                result.getRepos().size(), username, result.getCurrentPage(), result.getTotalPages());
+        
+        return new Page<>(result.getRepos(), 0, perPage, result.getRepos().size());
+    }
+
+    @Override
+    public Page<RepoSummary> fetchRepositoriesByPage(String username, int page, int perPage) {
+        log.info("Fetching repositories for username: {} page: {} with per_page: {}", username, page, perPage);
+        
+        PaginationResult<RepoSummary> result = client.fetchReposByPage(username, page, perPage);
+        
+        log.info("Successfully fetched {} repositories for username: {} (page {} of {})", 
+                result.getRepos().size(), username, result.getCurrentPage(), result.getTotalPages());
+        
+        return new Page<>(result.getRepos(), page - 1, perPage, result.getRepos().size());
     }
 }
 

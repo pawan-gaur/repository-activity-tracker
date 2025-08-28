@@ -59,4 +59,61 @@ public class GithubMappers {
         }
         return rels.get("next");
     }
+
+    // Parse the RFC 5988 Link header and extract pagination info
+    public static PaginationInfo parsePaginationInfo(HttpHeaders headers) {
+        String link = headers.getFirst("Link");
+        if (link == null) return new PaginationInfo(null, null, 0);
+
+        // pattern: <url>; rel="next", <url>; rel="last"
+        Pattern p = Pattern.compile("<([^>]+)>;\\s*rel=\"([^\"]+)\"");
+        Matcher m = p.matcher(link);
+        Map<String, String> rels = new HashMap<>();
+        while (m.find()) {
+            rels.put(m.group(2), m.group(1));
+        }
+        
+        String nextUrl = rels.get("next");
+        String lastUrl = rels.get("last");
+        int totalPages = 0;
+        
+        if (lastUrl != null) {
+            // Extract page number from last URL: .../repos?page=5&per_page=30
+            Pattern pagePattern = Pattern.compile("page=(\\d+)");
+            Matcher pageMatcher = pagePattern.matcher(lastUrl);
+            if (pageMatcher.find()) {
+                totalPages = Integer.parseInt(pageMatcher.group(1));
+            }
+        }
+        
+        return new PaginationInfo(nextUrl, lastUrl, totalPages);
+    }
+
+    public static class PaginationInfo {
+        private final String nextUrl;
+        private final String lastUrl;
+        private final int totalPages;
+
+        public PaginationInfo(String nextUrl, String lastUrl, int totalPages) {
+            this.nextUrl = nextUrl;
+            this.lastUrl = lastUrl;
+            this.totalPages = totalPages;
+        }
+
+        public String getNextUrl() {
+            return nextUrl;
+        }
+
+        public String getLastUrl() {
+            return lastUrl;
+        }
+
+        public int getTotalPages() {
+            return totalPages;
+        }
+
+        public boolean hasNext() {
+            return nextUrl != null;
+        }
+    }
 }
