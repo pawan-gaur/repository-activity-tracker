@@ -1,0 +1,352 @@
+name: Blue-Green Deployment to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  BLUE_PORT: 8080
+  GREEN_PORT: 8081
+  HEALTH_CHECK_ENDPOINT: /api/health/status
+  HEALTH_CHECK_TIMEOUT: 120
+
+jobs:
+  build:
+    name: Build Application
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v3
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+
+      - name: Verify JAR is executable
+        run: |
+          JAR_FILE=$(find target -name "*.jar" ! -name "*-original.jar" | head -n 1)
+          echo "Verifying JAR: $JAR_FILE"
+          if unzip -p $JAR_FILE META-INF/MANIFEST.MF | grep -q "Main-Class"; then
+            echo "✅ JAR is executable"
+          else
+            echo "❌ JAR is not executable"
+            exit 1
+          fi
+
+      - name: Get JAR file name
+        id: jar-info
+        run: |
+          JAR_FILE=$(find target -name "*.jar" ! -name "*-original.jar" | head -n 1)
+          JAR_NAME=$(basename $JAR_FILE)
+          echo "jar_file=$JAR_FILE" >> $GITHUB_OUTPUT
+          echo "jar_name=$JAR_NAME" >> $GITHUB_OUTPUT
+          echo "✅ Built JAR: $JAR_NAME"
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: application-jar
+          path: ${{ steps.jar-info.outputs.jar_file }}
+          retention-days: 1
+
+  deploy:
+    name: Deploy to EC2 (Blue-Green)
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: application-jar
+
+      - name: Get JAR filename
+        id: jar-info
+        run: |
+          JAR_NAME=$(ls *.jar | head -n 1)
+          echo "jar_name=$JAR_NAME" >> $GITHUB_OUTPUT
+          echo "Found JAR: $JAR_NAME"
+
+      - name: Deploy to Green Environment
+        env:
+          PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+          JAR_NAME: ${{ steps.jar-info.outputs.jar_name }}
+        run: |
+          echo "$PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          
+          echo "🚀 Starting Blue-Green Deployment..."
+          
+          # Copy JAR to EC2
+          echo "📦 Copying JAR to EC2..."
+          scp -o StrictHostKeyChecking=no -i private_key.pem \
+            $JAR_NAME ${USER}@${HOST}:/tmp/$JAR_NAME
+          
+          # Deploy to Green environment
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
+            set -e
+          
+            # Determine current active port (Blue)
+            if sudo systemctl is-active springboot-app-blue > /dev/null 2>&1; then
+              CURRENT_COLOR="blue"
+              CURRENT_PORT=${{ env.BLUE_PORT }}
+              NEW_COLOR="green"
+              NEW_PORT=${{ env.GREEN_PORT }}
+            else
+              CURRENT_COLOR="green"
+              CURRENT_PORT=${{ env.GREEN_PORT }}
+              NEW_COLOR="blue"
+              NEW_PORT=${{ env.BLUE_PORT }}
+            fi
+          
+            echo "🔵 Current active: $CURRENT_COLOR (port $CURRENT_PORT)"
+            echo "🟢 Deploying to: $NEW_COLOR (port $NEW_PORT)"
+          
+            # Stop the inactive service if running
+            sudo systemctl stop springboot-app-$NEW_COLOR || true
+          
+            # Backup and deploy new JAR
+            sudo mkdir -p /opt/springboot/$NEW_COLOR
+            if [ -f /opt/springboot/$NEW_COLOR/${{ steps.jar-info.outputs.jar_name }} ]; then
+              sudo cp /opt/springboot/$NEW_COLOR/${{ steps.jar-info.outputs.jar_name }} \
+                     /opt/springboot/$NEW_COLOR/${{ steps.jar-info.outputs.jar_name }}.backup
+            fi
+          
+            # Move new JAR
+            sudo mv /tmp/${{ steps.jar-info.outputs.jar_name }} \
+                    /opt/springboot/$NEW_COLOR/${{ steps.jar-info.outputs.jar_name }}
+            sudo chown ${USER}:${USER} /opt/springboot/$NEW_COLOR/${{ steps.jar-info.outputs.jar_name }}
+            sudo chmod 755 /opt/springboot/$NEW_COLOR/${{ steps.jar-info.outputs.jar_name }}
+          
+            # Start new service
+            echo "🚀 Starting $NEW_COLOR service on port $NEW_PORT..."
+            sudo systemctl start springboot-app-$NEW_COLOR
+          
+            # Save deployment info for next step
+            echo "NEW_COLOR=$NEW_COLOR" > /tmp/deployment-info.txt
+            echo "NEW_PORT=$NEW_PORT" >> /tmp/deployment-info.txt
+            echo "CURRENT_COLOR=$CURRENT_COLOR" >> /tmp/deployment-info.txt
+            echo "CURRENT_PORT=$CURRENT_PORT" >> /tmp/deployment-info.txt
+          EOF
+          
+          rm -f private_key.pem
+
+      - name: Health Check Green Environment
+        env:
+          PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          echo "$PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          
+          echo "🏥 Performing health check on Green environment..."
+          
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
+            set -e
+          
+            # Load deployment info
+            source /tmp/deployment-info.txt
+          
+            echo "Checking $NEW_COLOR service on port $NEW_PORT..."
+          
+            # Wait for application to start
+            echo "⏳ Waiting for application to start..."
+            sleep 15
+          
+            # Health check with timeout
+            TIMEOUT=${{ env.HEALTH_CHECK_TIMEOUT }}
+            ELAPSED=0
+            INTERVAL=5
+          
+            while [ $ELAPSED -lt $TIMEOUT ]; do
+              if curl -sf http://localhost:$NEW_PORT${{ env.HEALTH_CHECK_ENDPOINT }} > /dev/null 2>&1; then
+                echo "✅ Health check passed on port $NEW_PORT!"
+          
+                # Detailed health check
+                HEALTH_RESPONSE=$(curl -s http://localhost:$NEW_PORT${{ env.HEALTH_CHECK_ENDPOINT }})
+                echo "Health response: $HEALTH_RESPONSE"
+          
+                # Check service status
+                sudo systemctl status springboot-app-$NEW_COLOR --no-pager
+          
+                exit 0
+              fi
+          
+              echo "⏳ Waiting for application... ($ELAPSED/$TIMEOUT seconds)"
+              sleep $INTERVAL
+              ELAPSED=$((ELAPSED + INTERVAL))
+            done
+          
+            echo "❌ Health check failed after $TIMEOUT seconds"
+            echo "Service logs:"
+            sudo journalctl -u springboot-app-$NEW_COLOR -n 50 --no-pager
+            exit 1
+          EOF
+          
+          rm -f private_key.pem
+
+      - name: Switch Traffic to Green
+        env:
+          PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          echo "$PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          
+          echo "🔄 Switching traffic to Green environment..."
+          
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
+            set -e
+          
+            # Load deployment info
+            source /tmp/deployment-info.txt
+          
+            echo "Switching from $CURRENT_COLOR (port $CURRENT_PORT) to $NEW_COLOR (port $NEW_PORT)"
+          
+            # Update nginx/load balancer configuration
+            # This will be configured in the next step
+          
+            # For now, update the main service symlink
+            sudo systemctl stop springboot-app || true
+            sudo rm -f /etc/systemd/system/springboot-app.service
+            sudo ln -s /etc/systemd/system/springboot-app-$NEW_COLOR.service \
+                       /etc/systemd/system/springboot-app.service
+            sudo systemctl daemon-reload
+            sudo systemctl start springboot-app
+          
+            echo "✅ Traffic switched to $NEW_COLOR"
+          EOF
+          
+          rm -f private_key.pem
+
+      - name: Verify Traffic Switch
+        env:
+          PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          echo "$PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          
+          echo "🔍 Verifying traffic switch..."
+          
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
+            set -e
+          
+            # Load deployment info
+            source /tmp/deployment-info.txt
+          
+            # Verify new service is running
+            if sudo systemctl is-active springboot-app-$NEW_COLOR > /dev/null 2>&1; then
+              echo "✅ $NEW_COLOR service is active"
+            else
+              echo "❌ $NEW_COLOR service is not active"
+              exit 1
+            fi
+          
+            # Final health check
+            if curl -sf http://localhost:$NEW_PORT${{ env.HEALTH_CHECK_ENDPOINT }} > /dev/null 2>&1; then
+              echo "✅ Final health check passed"
+            else
+              echo "❌ Final health check failed"
+              exit 1
+            fi
+          
+            echo "🎉 Deployment successful!"
+            echo "Active service: $NEW_COLOR on port $NEW_PORT"
+          EOF
+          
+          rm -f private_key.pem
+
+      - name: Cleanup Old Blue Environment
+        if: success()
+        env:
+          PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          echo "$PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          
+          echo "🧹 Cleaning up old environment..."
+          
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
+            set -e
+          
+            # Load deployment info
+            source /tmp/deployment-info.txt
+          
+            echo "Stopping old $CURRENT_COLOR service..."
+            sudo systemctl stop springboot-app-$CURRENT_COLOR || true
+          
+            echo "✅ Cleanup complete. Old $CURRENT_COLOR is ready for next deployment."
+          
+            # Cleanup temp files
+            rm -f /tmp/deployment-info.txt
+          EOF
+          
+          rm -f private_key.pem
+
+      - name: Rollback on Failure
+        if: failure()
+        env:
+          PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          echo "$PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          
+          echo "🔴 Deployment failed. Rolling back..."
+          
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
+            set -e
+          
+            # Load deployment info if exists
+            if [ -f /tmp/deployment-info.txt ]; then
+              source /tmp/deployment-info.txt
+          
+              echo "Stopping failed $NEW_COLOR service..."
+              sudo systemctl stop springboot-app-$NEW_COLOR || true
+          
+              echo "Keeping $CURRENT_COLOR service active on port $CURRENT_PORT"
+          
+              # Show logs for debugging
+              echo "Failed deployment logs:"
+              sudo journalctl -u springboot-app-$NEW_COLOR -n 100 --no-pager
+          
+              rm -f /tmp/deployment-info.txt
+            fi
+          EOF
+          
+          rm -f private_key.pem
+          
+          echo "❌ Rollback complete. Previous version still running."
+          exit 1
+
+  notify:
+    name: Deployment Notification
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Send notification
+        run: |
+          if [ "${{ needs.deploy.result }}" == "success" ]; then
+            echo "✅ Deployment successful!"
+          else
+            echo "❌ Deployment failed!"
+          fi
