@@ -18,10 +18,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
@@ -51,7 +51,7 @@ jobs:
           echo "✅ Built JAR: $JAR_NAME"
 
       - name: Upload JAR artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: application-jar
           path: ${{ steps.jar-info.outputs.jar_file }}
@@ -64,7 +64,7 @@ jobs:
 
     steps:
       - name: Download JAR artifact
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: application-jar
 
@@ -215,10 +215,7 @@ jobs:
           
             echo "Switching from $CURRENT_COLOR (port $CURRENT_PORT) to $NEW_COLOR (port $NEW_PORT)"
           
-            # Update nginx/load balancer configuration
-            # This will be configured in the next step
-          
-            # For now, update the main service symlink
+            # Update the main service symlink
             sudo systemctl stop springboot-app || true
             sudo rm -f /etc/systemd/system/springboot-app.service
             sudo ln -s /etc/systemd/system/springboot-app-$NEW_COLOR.service \
