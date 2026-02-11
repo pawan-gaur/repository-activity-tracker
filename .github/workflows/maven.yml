@@ -34,12 +34,12 @@ jobs:
           
           # Copy JAR to EC2
           scp -o StrictHostKeyChecking=no -i private_key.pem \
-            target/*.jar ${USER}@${HOST}:/home/${USER}/app.jar
+            target/*.jar ${USER}@${HOST}:/home/${USER}/github-activity-connector-0.0.1.jar
           
           # Restart application on EC2
           ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
             sudo systemctl stop springboot-app || true
-            sudo mv /home/${USER}/app.jar /opt/springboot/app.jar
+            sudo mv /home/${USER}/app.jar /opt/springboot/github-activity-connector-0.0.1.jar
             sudo systemctl start springboot-app
             sudo systemctl status springboot-app
           EOF
