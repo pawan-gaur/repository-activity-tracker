@@ -13,10 +13,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
       
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v3
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
           cache: maven
       
@@ -32,16 +32,62 @@ jobs:
           echo "$PRIVATE_KEY" > private_key.pem
           chmod 600 private_key.pem
           
-          # Copy JAR to EC2
-          scp -o StrictHostKeyChecking=no -i private_key.pem \
-            target/*.jar ${USER}@${HOST}:/home/${USER}/github-activity-connector-0.0.1.jar
+          # Stop the application first
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} \
+            'sudo systemctl stop springboot-app || true'
           
-          # Restart application on EC2
+          # Copy JAR to EC2 temp directory
+          scp -o StrictHostKeyChecking=no -i private_key.pem \
+            target/github-activity-connector-0.0.1.jar ${USER}@${HOST}:/tmp/github-activity-connector-0.0.1.jar
+          
+          # Move to final location and restart application
           ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
-            sudo systemctl stop springboot-app || true
-            sudo mv /home/${USER}/app.jar /opt/springboot/github-activity-connector-0.0.1.jar
+            set -e
+            
+            # Backup old JAR if exists
+            if [ -f /opt/springboot/github-activity-connector-0.0.1.jar ]; then
+              sudo cp /opt/springboot/github-activity-connector-0.0.1.jar /opt/springboot/github-activity-connector-0.0.1.jar.backup
+            fi
+            
+            # Move new JAR to application directory
+            sudo mv /tmp/github-activity-connector-0.0.1.jar /opt/springboot/github-activity-connector-0.0.1.jar
+            
+            # Set proper permissions
+            sudo chown ${USER}:${USER} /opt/springboot/github-activity-connector-0.0.1.jar
+            sudo chmod 755 /opt/springboot/github-activity-connector-0.0.1.jar
+            
+            # Start the application
             sudo systemctl start springboot-app
-            sudo systemctl status springboot-app
+            
+            # Wait and check status
+            sleep 5
+            sudo systemctl status springboot-app --no-pager
+          EOF
+          
+          rm -f private_key.pem
+      
+      - name: Health Check
+        env:
+          PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          echo "$PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
+            # Check if application is running
+            if sudo systemctl is-active springboot-app > /dev/null 2>&1; then
+              echo "✅ Application is running!"
+              # Show recent logs
+              echo "Recent logs:"
+              sudo journalctl -u springboot-app -n 20 --no-pager
+            else
+              echo "❌ Application failed to start"
+              echo "Error logs:"
+              sudo journalctl -u springboot-app -n 50 --no-pager
+              exit 1
+            fi
           EOF
           
           rm -f private_key.pem
