@@ -26,7 +26,7 @@ public class HealthController {
 
     @GetMapping("/status-new")
     public ResponseEntity<?> getHealthStatusNew() {
-        log.info("Received request to get Health Status : {}", LocalDateTime.now());
+        log.info("Received request to get Health Status New : {}", LocalDateTime.now());
         return new ResponseEntity<>("Health OK from Updated end-point", HttpStatus.OK);
     }
 }
