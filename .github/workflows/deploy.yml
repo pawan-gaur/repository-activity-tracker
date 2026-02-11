@@ -90,11 +90,11 @@ jobs:
           
           ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
             if sudo systemctl is-active springboot-app > /dev/null 2>&1; then
-              echo "✅ Application is running!"
+              echo "Application is running!!!"
               echo "Recent logs:"
               sudo journalctl -u springboot-app -n 20 --no-pager
             else
-              echo "❌ Application failed to start"
+              echo "Application failed to start..XXXX"
               echo "Error logs:"
               sudo journalctl -u springboot-app -n 50 --no-pager
               exit 1
