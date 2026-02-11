@@ -23,14 +23,27 @@ jobs:
       - name: Build with Maven
         run: mvn clean package -DskipTests
       
+      - name: Get JAR file name
+        id: get-jar
+        run: |
+          JAR_FILE=$(find target -name "*.jar" ! -name "*-original.jar" | head -n 1)
+          JAR_NAME=$(basename $JAR_FILE)
+          echo "jar_file=$JAR_FILE" >> $GITHUB_OUTPUT
+          echo "jar_name=$JAR_NAME" >> $GITHUB_OUTPUT
+          echo "Found JAR: $JAR_NAME at $JAR_FILE"
+      
       - name: Deploy to EC2
         env:
           PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
           HOST: ${{ secrets.EC2_HOST }}
           USER: ${{ secrets.EC2_USER }}
+          JAR_FILE: ${{ steps.get-jar.outputs.jar_file }}
+          JAR_NAME: ${{ steps.get-jar.outputs.jar_name }}
         run: |
           echo "$PRIVATE_KEY" > private_key.pem
           chmod 600 private_key.pem
+          
+          echo "Deploying $JAR_NAME to EC2..."
           
           # Stop the application first
           ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} \
@@ -38,23 +51,23 @@ jobs:
           
           # Copy JAR to EC2 temp directory
           scp -o StrictHostKeyChecking=no -i private_key.pem \
-            target/github-activity-connector-0.0.1.jar ${USER}@${HOST}:/tmp/github-activity-connector-0.0.1.jar
+            $JAR_FILE ${USER}@${HOST}:/tmp/$JAR_NAME
           
           # Move to final location and restart application
-          ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << EOF
             set -e
             
             # Backup old JAR if exists
-            if [ -f /opt/springboot/github-activity-connector-0.0.1.jar ]; then
-              sudo cp /opt/springboot/github-activity-connector-0.0.1.jar /opt/springboot/github-activity-connector-0.0.1.jar.backup
+            if [ -f /opt/springboot/$JAR_NAME ]; then
+              sudo cp /opt/springboot/$JAR_NAME /opt/springboot/$JAR_NAME.backup
             fi
             
             # Move new JAR to application directory
-            sudo mv /tmp/github-activity-connector-0.0.1.jar /opt/springboot/github-activity-connector-0.0.1.jar
+            sudo mv /tmp/$JAR_NAME /opt/springboot/$JAR_NAME
             
             # Set proper permissions
-            sudo chown ${USER}:${USER} /opt/springboot/github-activity-connector-0.0.1.jar
-            sudo chmod 755 /opt/springboot/github-activity-connector-0.0.1.jar
+            sudo chown ${USER}:${USER} /opt/springboot/$JAR_NAME
+            sudo chmod 755 /opt/springboot/$JAR_NAME
             
             # Start the application
             sudo systemctl start springboot-app
@@ -76,10 +89,8 @@ jobs:
           chmod 600 private_key.pem
           
           ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
-            # Check if application is running
             if sudo systemctl is-active springboot-app > /dev/null 2>&1; then
               echo "✅ Application is running!"
-              # Show recent logs
               echo "Recent logs:"
               sudo journalctl -u springboot-app -n 20 --no-pager
             else
